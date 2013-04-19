@@ -1,0 +1,13 @@
+#!/bin/sh
+
+mount -w /proc /proc -t proc
+mount -t sysfs sysfs /sys
+
+ifconfig lo 127.0.0.1 up
+route add 127.0.0.0 dev lo
+
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+ifconfig eth0 192.168.1.239 up
+ifconfig eth1 192.168.9.239 up
+

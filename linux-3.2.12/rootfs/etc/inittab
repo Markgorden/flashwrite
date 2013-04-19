@@ -1,0 +1,7 @@
+#
+# /etc/inittab
+#
+
+::sysinit:/etc/init.d/rcS
+::respawn:/bin/sh
+
