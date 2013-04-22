@@ -1,0 +1,4 @@
+C17, slow to reboot once the ethernet card has been used and warmed up.
+C18, slow to reboot once the ethernet card has been used and warmed up.
+C19, slow to reboot once the ethernet card has been used and warmed up.
+C20, slow to reboot once the ethernet card has been used and warmed up.
