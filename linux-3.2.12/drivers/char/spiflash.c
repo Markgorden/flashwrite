@@ -1,9 +1,13 @@
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/ioport.h>	// for request_region()
 #include <asm/io.h>
+#include <linux/slab.h>
+#include <linux/proc_fs.h>
+#include <asm/uaccess.h>
 
 #define EBD_FLASH_BASE	0xffc00000
 
@@ -61,6 +65,10 @@ static unsigned int flash_size = 0x00400000;	// size = 4MB
 
 #define FIFO_ENABLE		0x10
 #define AUTO_FETCH_DISABLE	0x20
+
+#define proc_kernel_name "spiflash_kernel"
+#define proc_config_name "spiflash_config"
+#define proc_status_name "spiflash_status"
 
 inline void SPI_OUTPUT_COMPLETE(void)
 {
@@ -244,31 +252,6 @@ static int flash_write_word(__u32 dst_addr, __u32 src_addr, int count)
 	return 0;
 }
 
-static int flash_small_block_erase(__u32 addr)
-{
-	unsigned char ad1,ad2,ad3;
-  
-	if ( flash_state != FL_READY )
-		return -EIO;
-
-	flash_state = FL_ERASING;
-	SPI_ENTER();
-
-	ad3 = (char) (addr & 0x000000FF);
-	ad2 = (char) ((addr & 0x0000FF00) >> 8);
-	ad1 = (char) ((addr & 0x00FF0000) >> 16);
-
-	SPI_WRITE(CMD_SECTOR_ERASE, ad1, ad2, ad3); 
-	SPICS_HIGH();
-
-	SPI_WAIT_BUSY();
-
-	SPI_EXIT();
-	flash_state = FL_READY;
-
-	return 0;
-}
-
 static int flash_erase_block(__u32 addr)
 {
 	unsigned char ad1,ad2,ad3;
@@ -294,16 +277,10 @@ static int flash_erase_block(__u32 addr)
 	return 0;
 }
 
-#define USE_SPI_READ	1
-
 int flash_read(__u32 addr, char *buffer, int size)
 {
         unsigned int i;
-#if defined(USE_SPI_READ)
 	unsigned char ad1, ad2, ad3;
-#else
-	char *srcaddr = (char *) (EBD_FLASH_BASE + addr);
-#endif
 
 	// modified by ethan on 06/23/2004 to serialize flash operations.
 	while ( flash_state != FL_READY ) {
@@ -315,21 +292,16 @@ int flash_read(__u32 addr, char *buffer, int size)
 	//spin_lock_bh(&flash_mutex);
 	flash_state = FL_READING;
 
-#if defined(USE_SPI_READ)
 	SPI_ENTER();
 
 	ad3 = (char) (addr & 0x000000FF);
 	ad2 = (char) ((addr & 0x0000FF00) >> 8);
 	ad1 = (char) ((addr & 0x00FF0000) >> 16);
 
-#if 1
 	// if FAST_READ is used, the first return byte is dummy byte.
 	SPI_READ(CMD_FAST_READ, ad1, ad2, ad3); 
 	SPI_DATA_READY();
 	buffer[0] = inb(REG_SPI_INPORT);
-#else
-	SPI_READ(CMD_READ, ad1, ad2, ad3); 
-#endif
 
 	for (i = 0; i < size; i++) {
 		SPI_DATA_READY();
@@ -340,14 +312,8 @@ int flash_read(__u32 addr, char *buffer, int size)
 	SPI_WAIT_BUSY();
 
 	SPI_EXIT();
-#else
-	for (i = 0; i < size; i++) {
-		buffer[i] = srcaddr[i];
-	}
-#endif
 
 	flash_state = FL_READY;
-	//spin_unlock_bh(&flash_mutex);
 
 	return size;
 }
@@ -361,41 +327,22 @@ int flash_erase_write(__u32 addr, char *data, int len)
 
 	if ( len <= 0 || (addr + len) > flash_size )
 		return -EINVAL;
-	if ( addr >= 0x003e0000 )	// boot loader address space.
+	if ( addr >= 0x008e0000 )	// boot loader address space.
 		return -EINVAL;
 
 	offset = addr;
 	last_addr = addr + len - 1;
 
-	if ( addr >= 0x003d0000 && addr < 0x003e0000 ) {	// configuration space
-		// sector size = 4KB
-		if ( (addr & 0x0fff) != 0 ) {
-			printk("Address(%08x) is not aligned flash boundary\n", addr);
-			return -EINVAL;
-		}
+	// block size = 64KB
+	if ( (addr & 0xffff) != 0 ) {
+		printk("Address(%08x) is not aligned flash boundary\n", addr);
+		return -EINVAL;
+	}
 
-		if ( (addr + len) > 0x003e0000 ) {
-			printk("Address + Length (%08x + %08x) is out of configuration space\n", addr, len);
-			return -EINVAL;
-		}
-		
-		while ( offset < last_addr ) {
-			if ( (status=flash_small_block_erase(offset)) != 0 )
-				return status;
-			offset += 0x1000;
-		}
-	} else {
-		// block size = 64KB
-		if ( (addr & 0xffff) != 0 ) {
-			printk("Address(%08x) is not aligned flash boundary\n", addr);
-			return -EINVAL;
-		}
-
-		while ( offset < last_addr ) {
-			if ( (status=flash_erase_block(offset)) != 0 )
-				return status;
-			offset += 0x10000;
-		}
+	while ( offset < last_addr ) {
+		if ( (status=flash_erase_block(offset)) != 0 )
+			return status;
+		offset += 0x10000;
 	}
 
 	if ( (status=flash_write_word(addr, (__u32) data, len)) != 0 )
@@ -404,11 +351,59 @@ int flash_erase_write(__u32 addr, char *data, int len)
 	return 0;
 }
 
-// Kernel+FileSystem:	0x00000000 - 0x003cffff
-// Config. Data:	0x003d0000 - 0x003dffff
-// Boot Loader:		0x003e0000 - 0x003fffff
+static ssize_t total_bytes = 0;
+static char status_output[12];
+
+static int status_open(struct inode *inode, struct file *f)
+{
+	if (snprintf(status_output, 12, "%d", total_bytes) >= 12)
+		return -EFAULT;
+	return 0;
+}
+
+static ssize_t status_read(struct file *f, char __user *data, size_t size, loff_t * offset)
+{
+	int len = strlen(status_output);
+	if (*offset == len)
+		return 0;
+
+	if (copy_to_user(data, status_output, len) != 0)
+	{
+		return -EFAULT;
+	}
+	*offset = len;
+	return len;
+}
+
+static const struct file_operations status_fops = {
+	.read = status_read,
+	.open = status_open
+};
+
+static const struct file_operations kernel_fops = {
+};
+
+static const struct file_operations config_fops = {
+};
+
+// Kernel+FileSystem:	0x00800000 - 0x00fbffff
+// Config. Data:	0x00fc0000 - 0x00fdffff
+// Boot Loader:		0x00fe0000 - 0x00ffffff
 static int __init spiflash_init(void)
 {
+	if (!proc_create(proc_kernel_name, 0, NULL, &kernel_fops))
+	{
+		return -ENOMEM;
+	}
+	if (!proc_create(proc_config_name, 0, NULL, &config_fops))
+	{
+		return -ENOMEM;
+	}
+	if (!proc_create(proc_status_name, 0, NULL, &status_fops))
+	{
+		return -ENOMEM;
+	}
+
 	request_region(0xfc00, 0x10, "spiflash");
 
 	outl(0x80000040, 0xcf8);
@@ -419,13 +414,12 @@ static int __init spiflash_init(void)
 
 	flash_state = FL_READY;
 
-#if 0
 	{
 		int i;
 		char *buf;
 		buf = (char *) kmalloc(0x1000, GFP_KERNEL);
 #if 1
-		flash_read(0x003d0000, buf, 0x1000);
+		flash_read(0x00fe0000, buf, 0x1000);
 		for (i = 0; i < 0x100; i++) {
 			if ( (i % 16) == 0 )
 				printk("\n");
@@ -438,13 +432,18 @@ static int __init spiflash_init(void)
 		flash_erase_write(0x003d0000, buf, 0x1000);
 #endif
 	}
-#endif
 	return 0;
 }
 
 static void __exit spiflash_exit(void)
 {
+	remove_proc_entry(proc_kernel_name, NULL);
+	remove_proc_entry(proc_config_name, NULL);
+	remove_proc_entry(proc_status_name, NULL);
 }
 
 module_init(spiflash_init);
 module_exit(spiflash_exit);
+
+MODULE_AUTHOR("Paul Gortmaker");
+MODULE_LICENSE("GPL");
