@@ -9,12 +9,7 @@
 #include <linux/proc_fs.h>
 #include <asm/uaccess.h>
 
-#define EBD_FLASH_BASE	0xffc00000
-
-#define AT26DF321_SIZE		0x00400000
-#define AT26DF321_SECTOR_SIZE	0x10000
-#define AT26DF321_SECTOR_COUNT	64	
-#define	AT26DF321_ID		0x471f 
+#define SECTOR_SIZE		0x0010000
 
 enum {
 	FL_UNKNOWN,
@@ -35,7 +30,9 @@ enum {
 static unsigned int flash_state = FL_UNKNOWN;
 //static spinlock_t flash_mutex = SPIN_LOCK_UNLOCKED;
 static unsigned int flash_id;
-static unsigned int flash_size = 0x00400000;	// size = 4MB
+static unsigned int kernel_start = 0x00800000;
+static unsigned int config_start = 0x00fc0000;
+static unsigned int boot_start = 0x00fe0000;
 
 #define REG_SPI_OUTPORT		0xFC00
 #define	REG_SPI_INPORT		REG_SPI_OUTPORT+1
@@ -325,9 +322,7 @@ int flash_erase_write(__u32 addr, char *data, int len)
 
 	printk("flash erase write: addr = %08x\n", addr);
 
-	if ( len <= 0 || (addr + len) > flash_size )
-		return -EINVAL;
-	if ( addr >= 0x008e0000 )	// boot loader address space.
+	if ( len <= 0 || (addr + len) >= boot_start )
 		return -EINVAL;
 
 	offset = addr;
@@ -342,7 +337,7 @@ int flash_erase_write(__u32 addr, char *data, int len)
 	while ( offset < last_addr ) {
 		if ( (status=flash_erase_block(offset)) != 0 )
 			return status;
-		offset += 0x10000;
+		offset += SECTOR_SIZE;
 	}
 
 	if ( (status=flash_write_word(addr, (__u32) data, len)) != 0 )
@@ -361,6 +356,19 @@ static int status_open(struct inode *inode, struct file *f)
 	return 0;
 }
 
+static char* buffer;
+static int spi_open(struct inode *inode, struct file *f)
+{
+	if (!(buffer = kmalloc(SECTOR_SIZE, GFP_KERNEL)))
+		return -ENOMEM;
+	return 0;
+}
+static int spi_close(struct inode *inode, struct file *f)
+{
+	kfree(buffer);
+	return 0;
+}
+
 static ssize_t status_read(struct file *f, char __user *data, size_t size, loff_t * offset)
 {
 	int len = strlen(status_output);
@@ -374,16 +382,107 @@ static ssize_t status_read(struct file *f, char __user *data, size_t size, loff_
 	*offset = len;
 	return len;
 }
+static ssize_t status_write(struct file *f, char const __user *data, size_t size, loff_t * offset)
+{
+	total_bytes = 0;
+	return size;
+}
 
 static const struct file_operations status_fops = {
 	.read = status_read,
-	.open = status_open
+	.open = status_open,
+	.write = status_write,
 };
 
+static ssize_t spi_read(int start, int end, struct file *f, char __user *data, size_t size, loff_t * offset)
+{
+	if (size > SECTOR_SIZE)
+		return -ENOMEM;
+
+	total_bytes = *offset;
+	if (*offset >= end - start)
+		return 0;
+
+	if (flash_read(start + *offset, buffer, size) != size)
+	{
+		return -EFAULT;
+	}
+
+	if (copy_to_user(data, buffer, size) != 0)
+	{
+		return -EFAULT;
+	}
+
+	*offset += size;
+	return size;
+}
+
+static ssize_t spi_kernel_read(struct file *f, char __user *data, size_t size, loff_t * offset)
+{
+	return spi_read(kernel_start, config_start, f, data, size, offset);
+}
+
+static ssize_t spi_config_read(struct file *f, char __user *data, size_t size, loff_t * offset)
+{
+	return spi_read(config_start, boot_start, f, data, size, offset);
+}
+
+static ssize_t spi_write(int start, int end, struct file *f, const char __user *data, size_t size, loff_t * offset)
+{
+	int len, leftOver, buffer_size;
+	char* buffer;
+
+	total_bytes = *offset;
+	len = end - start;
+	if (*offset >= len)
+		return 0;
+
+	leftOver = len - *offset;
+	buffer_size = leftOver < size ? leftOver : size;
+
+	buffer = kmalloc(buffer_size, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
+
+	if (copy_from_user(buffer, data, buffer_size) != 0)
+	{
+		kfree(buffer);
+		return -EFAULT;
+	}
+
+	if (flash_erase_write(start + *offset, buffer, buffer_size))
+	{
+		kfree(buffer);
+		return -EFAULT;
+	}
+
+	*offset += buffer_size;
+	kfree(buffer);
+	return buffer_size;
+}
+
+static ssize_t spi_kernel_write(struct file *f, const char __user *data, size_t size, loff_t * offset)
+{
+	return spi_write(kernel_start, config_start, f, data, size, offset);
+}
+
+static ssize_t spi_config_write(struct file *f, const char __user *data, size_t size, loff_t * offset)
+{
+	return spi_write(config_start, boot_start, f, data, size, offset);
+}
+
 static const struct file_operations kernel_fops = {
+	.open = spi_open,
+	.read = spi_kernel_read,
+	.write = spi_kernel_write,
+	.release = spi_close,
 };
 
 static const struct file_operations config_fops = {
+	.open = spi_open,
+	.read = spi_config_read,
+	.write = spi_config_write,
+	.release = spi_close,
 };
 
 // Kernel+FileSystem:	0x00800000 - 0x00fbffff
@@ -413,24 +512,21 @@ static int __init spiflash_init(void)
 	printk("flash id: %04x\n", flash_id);
 
 	flash_state = FL_READY;
-
 	{
 		int i;
 		char *buf;
 		buf = (char *) kmalloc(0x1000, GFP_KERNEL);
-#if 1
-		flash_read(0x00fe0000, buf, 0x1000);
+		flash_read(0x00fc0000, buf, 0x1000);
 		for (i = 0; i < 0x100; i++) {
 			if ( (i % 16) == 0 )
 				printk("\n");
 			printk("%02x ", (unsigned char) buf[i]);
 		}
 		printk("\n");
-#else
+
 		for (i = 0; i < 0x1000; i++)
 			buf[i] = i;	
-		flash_erase_write(0x003d0000, buf, 0x1000);
-#endif
+		flash_erase_write(config_start, buf, 0x1000);
 	}
 	return 0;
 }
