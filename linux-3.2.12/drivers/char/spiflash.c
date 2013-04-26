@@ -30,9 +30,9 @@ enum {
 static unsigned int flash_state = FL_UNKNOWN;
 //static spinlock_t flash_mutex = SPIN_LOCK_UNLOCKED;
 static unsigned int flash_id;
-static unsigned int kernel_start = 0x00800000;
-static unsigned int config_start = 0x00fc0000;
-static unsigned int boot_start = 0x00fe0000;
+static const unsigned int kernel_start = 0x00800000;
+static const unsigned int config_start = 0x00fc0000;
+static const unsigned int boot_start = 0x00fd0000;
 
 #define REG_SPI_OUTPORT		0xFC00
 #define	REG_SPI_INPORT		REG_SPI_OUTPORT+1
@@ -322,7 +322,7 @@ int flash_erase_write(__u32 addr, char *data, int len)
 
 	printk("flash erase write: addr = %08x\n", addr);
 
-	if ( len <= 0 || (addr + len) >= boot_start )
+	if ( len <= 0 || (addr + len) > boot_start )
 		return -EINVAL;
 
 	offset = addr;
@@ -346,6 +346,7 @@ int flash_erase_write(__u32 addr, char *data, int len)
 	return 0;
 }
 
+// ******************* spiflash_status START ************************
 static ssize_t total_bytes = 0;
 static char status_output[12];
 
@@ -353,19 +354,6 @@ static int status_open(struct inode *inode, struct file *f)
 {
 	if (snprintf(status_output, 12, "%d", total_bytes) >= 12)
 		return -EFAULT;
-	return 0;
-}
-
-static char* buffer;
-static int spi_open(struct inode *inode, struct file *f)
-{
-	if (!(buffer = kmalloc(SECTOR_SIZE, GFP_KERNEL)))
-		return -ENOMEM;
-	return 0;
-}
-static int spi_close(struct inode *inode, struct file *f)
-{
-	kfree(buffer);
 	return 0;
 }
 
@@ -384,6 +372,7 @@ static ssize_t status_read(struct file *f, char __user *data, size_t size, loff_
 }
 static ssize_t status_write(struct file *f, char const __user *data, size_t size, loff_t * offset)
 {
+	printk("filename=%s\n", f->f_path.dentry->d_iname);
 	total_bytes = 0;
 	return size;
 }
@@ -393,30 +382,134 @@ static const struct file_operations status_fops = {
 	.open = status_open,
 	.write = status_write,
 };
+// ******************* spiflash_status END ************************
 
-static ssize_t spi_read(int start, int end, struct file *f, char __user *data, size_t size, loff_t * offset)
+// ******************* spiflash_kernel/config START ************************
+static char* buffer;
+static char* buffer_p;
+static int flash_p;
+static int spi_size;
+
+static int spi_open(struct inode *inode, struct file *f)
 {
-	if (size > SECTOR_SIZE)
+	if (f->f_mode & FMODE_READ && f->f_mode & FMODE_WRITE)
+	{
+		return -EFAULT;
+	}
+	
+	if (!(buffer = kmalloc(SECTOR_SIZE, GFP_KERNEL)))
 		return -ENOMEM;
 
-	total_bytes = *offset;
-	if (*offset >= end - start)
-		return 0;
-
-	if (flash_read(start + *offset, buffer, size) != size)
+	if (!strcmp(f->f_path.dentry->d_iname, proc_kernel_name))
+	{
+		flash_p = kernel_start;
+		spi_size = config_start - kernel_start;
+	}
+	else if (!strcmp(f->f_path.dentry->d_iname, proc_config_name))
+	{
+		flash_p = config_start;
+		spi_size = boot_start - config_start;
+	}
+	else
 	{
 		return -EFAULT;
 	}
 
-	if (copy_to_user(data, buffer, size) != 0)
-	{
-		return -EFAULT;
-	}
-
-	*offset += size;
-	return size;
+	buffer_p = f->f_mode & FMODE_READ ? buffer + SECTOR_SIZE : buffer;
+	total_bytes = 0;
+	return 0;
 }
 
+static int spi_close(struct inode *inode, struct file *f)
+{
+	if (f->f_mode & FMODE_WRITE && buffer_p != buffer)
+	{
+		if (flash_erase_write(flash_p, buffer, SECTOR_SIZE))
+		{
+			return -EFAULT;
+		}
+	}
+	kfree(buffer);
+	return 0;
+}
+
+static ssize_t spi_read(struct file *f, char __user *data, size_t size, loff_t * offset)
+{
+	int leftOver, len;
+
+	if (*offset >= spi_size)
+	{	
+		return 0;
+	}
+
+	leftOver = buffer + SECTOR_SIZE - buffer_p;
+	if (leftOver == 0)
+	{
+		if (flash_read(flash_p, buffer, SECTOR_SIZE) != SECTOR_SIZE)
+		{
+			return -EFAULT;
+		}
+		flash_p += SECTOR_SIZE;
+		buffer_p = buffer;
+		leftOver = SECTOR_SIZE;
+	}
+	len = leftOver > size ? size : leftOver;
+
+	if (copy_to_user(data, buffer_p, len) != 0)
+	{
+		return -EFAULT;
+	}
+	buffer_p += len;
+	*offset += len;
+	total_bytes = *offset;
+	return len;
+}
+
+static ssize_t spi_write(struct file *f, const char __user *data, size_t size, loff_t * offset)
+{
+	int leftOver, len;
+
+	leftOver = buffer + SECTOR_SIZE - buffer_p;
+	if (leftOver == 0)
+	{
+		if (flash_erase_write(flash_p, buffer, SECTOR_SIZE))
+		{
+			buffer_p = buffer;
+			return -EFAULT;
+		}
+		flash_p += SECTOR_SIZE;
+		buffer_p = buffer;
+		leftOver = SECTOR_SIZE;
+	}
+	len = leftOver > size ? size : leftOver;
+	if (copy_from_user(buffer_p, data, len) != 0)
+	{
+		return -EFAULT;
+	}
+	buffer_p += len;
+	*offset += len;
+	total_bytes = *offset;
+	return len;
+}
+
+static const struct file_operations config_fops = {
+	.open = spi_open,
+	.read = spi_read,
+	.write = spi_write,
+	.release = spi_close,
+};
+
+static const struct file_operations kernel_fops = {
+	.open = spi_open,
+	.read = spi_read,
+	.write = spi_write,
+	.release = spi_close,
+};
+
+// ******************* spiflash_kernel/config END ************************
+
+
+/*
 static ssize_t spi_kernel_read(struct file *f, char __user *data, size_t size, loff_t * offset)
 {
 	return spi_read(kernel_start, config_start, f, data, size, offset);
@@ -427,8 +520,31 @@ static ssize_t spi_config_read(struct file *f, char __user *data, size_t size, l
 	return spi_read(config_start, boot_start, f, data, size, offset);
 }
 
+
 static ssize_t spi_write(int start, int end, struct file *f, const char __user *data, size_t size, loff_t * offset)
 {
+	int leftOver = SECTOR_SIZE - (buffer_p - buffer);
+	int len = size < leftOver ? size : leftOver;
+	
+	copy_from_user(buffer_p, data, len);	// todo: check
+
+	buffer_p += len;
+	if (buffer_p - buffer == SECTOR_SIZE)
+	{
+			if (flash_erase_write(start + *offset, buffer, buffer_size))
+			{
+				return -EFAULT;
+			}
+		printk("writing \n");
+		buffer_p = buffer;
+	}
+	*offset += len;
+	return len;
+
+	memcpy(buffer, data, size);
+	if (size > SECTOR_SIZE)
+		return -ENOMEM;
+
 	int len, leftOver, buffer_size;
 	char* buffer;
 
@@ -477,14 +593,7 @@ static const struct file_operations kernel_fops = {
 	.write = spi_kernel_write,
 	.release = spi_close,
 };
-
-static const struct file_operations config_fops = {
-	.open = spi_open,
-	.read = spi_config_read,
-	.write = spi_config_write,
-	.release = spi_close,
-};
-
+*/
 // Kernel+FileSystem:	0x00800000 - 0x00fbffff
 // Config. Data:	0x00fc0000 - 0x00fdffff
 // Boot Loader:		0x00fe0000 - 0x00ffffff
