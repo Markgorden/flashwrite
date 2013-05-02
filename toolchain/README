@@ -1,0 +1,14 @@
+The toolchain was compiled on Fedora release 17 (Beefy Miracle) 32-bit from 
+\\filer\Omega\ps62\ps62.src.tgz\buildroot-2012.02.tar.gz
+
+To re-create the tool-chain,
+
+mkdir -p /work && /work && tar xzvf buildroot-2012.02.tar.tgz && cd buildroot-2012.02
+
+Then
+- copy buildroot_config file to the /work/buildroot-2012.02/.config
+- run make
+
+Upon completion the toolchain will be available as /work/buildroot-2012.02/output/host
+
+a precompile version is here \\filer\Omega\ps62\buildroot-2012.02.compiled.tgz
