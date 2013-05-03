@@ -1,0 +1,1 @@
+../../applets/install.sh

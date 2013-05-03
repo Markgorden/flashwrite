@@ -1,0 +1,1 @@
+../../libbb/full_write.c

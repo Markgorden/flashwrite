@@ -1,0 +1,1 @@
+../../selinux/getenforce.c

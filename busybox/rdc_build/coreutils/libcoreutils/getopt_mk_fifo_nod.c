@@ -1,0 +1,1 @@
+../../../coreutils/libcoreutils/getopt_mk_fifo_nod.c

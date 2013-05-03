@@ -1,0 +1,1 @@
+../../libbb/safe_strncpy.c

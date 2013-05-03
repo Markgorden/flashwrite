@@ -1,0 +1,1 @@
+../../libbb/ptr_to_globals.c

@@ -1,0 +1,1 @@
+../../libbb/warn_ignoring_args.c

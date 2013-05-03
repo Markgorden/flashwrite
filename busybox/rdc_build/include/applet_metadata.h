@@ -1,0 +1,1 @@
+../../include/applet_metadata.h

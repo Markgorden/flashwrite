@@ -1,0 +1,1 @@
+../../testsuite/testing.sh

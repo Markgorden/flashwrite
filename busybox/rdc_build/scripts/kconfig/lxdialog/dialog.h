@@ -1,0 +1,1 @@
+../../../../scripts/kconfig/lxdialog/dialog.h

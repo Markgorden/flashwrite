@@ -1,0 +1,1 @@
+../../console-tools/deallocvt.c

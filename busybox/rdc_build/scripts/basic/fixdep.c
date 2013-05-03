@@ -1,0 +1,1 @@
+../../../scripts/basic/fixdep.c

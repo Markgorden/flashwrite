@@ -1,0 +1,1 @@
+../../coreutils/id_test.sh

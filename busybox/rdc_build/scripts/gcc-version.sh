@@ -1,0 +1,1 @@
+../../scripts/gcc-version.sh

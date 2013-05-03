@@ -1,0 +1,1 @@
+../../console-tools/setlogcons.c

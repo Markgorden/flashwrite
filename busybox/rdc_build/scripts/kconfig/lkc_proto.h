@@ -1,0 +1,1 @@
+../../../scripts/kconfig/lkc_proto.h

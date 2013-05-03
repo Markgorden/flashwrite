@@ -1,0 +1,1 @@
+../../../scripts/kconfig/kconfig_load.c

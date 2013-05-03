@@ -1,0 +1,1 @@
+../../libbb/isdirectory.c
